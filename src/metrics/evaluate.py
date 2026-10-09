@@ -17,7 +17,7 @@ from .utils import rgb_to_grayscale
 Command line program to evaluate PSNR and LPIPS on datasets of images, one clean copy and one degraded copy per image.
 Images are assumed to be RGB. A grayscale version is computed using Rec. 601 luma weights for PSNR.
 
-This can be run from the root directory using `python -m src.metrics.evaluate_dataset "input_directory"`.
+This can be run from the root directory using `python -m src.metrics.evaluate "input_directory"`.
 By default, the degraded image filename will be assumed to be the clean image filename with "_out" appended to the end.
 """
 
@@ -69,11 +69,6 @@ def parse_arguments():
         default="_out",
         help="Appended onto the end of the clean image filename to find the degraded image.",
     )
-    # parser.add_argument(
-    #     "-d",
-    #     "--degraded-image",
-    #     help="Degraded image filename. If provided, will be used over the degraded-extension.",
-    # )
     parser.add_argument(
         "-s",
         "--spatial",
@@ -96,21 +91,9 @@ def parse_arguments():
 
 
 def main():
-    # find the degraded image
     args = parse_arguments()
-    # if args.degraded_image:
-    #     degraded_image_filename = args.degraded_image
-    # else:
-    #     clean_filepath = Path(args.clean_filename)
-    #     suffix = args.degraded_suffix
-
-    #     degraded_image_filename = str(
-    #         clean_filepath.parent
-    #         / f"{clean_filepath.stem}{suffix}{clean_filepath.suffix}"
-    #     )
 
     # iterate through datasets (folders in the input folder)
-
     rootdir = Path(args.input_dir)
     dataset_list = [d for d in rootdir.iterdir() if d.is_dir()]
 
