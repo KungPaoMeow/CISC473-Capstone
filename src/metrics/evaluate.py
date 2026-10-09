@@ -153,8 +153,8 @@ def main():
             psnr_dataset.append(psnr)
 
             # compute LPIPS
-            clean_lpips = lpips.im2tensor(lpips.load_image(str(clean_filename)))
-            degraded_lpips = lpips.im2tensor(lpips.load_image(str(degraded_filepath)))
+            clean_lpips = lpips.im2tensor(clean_image)
+            degraded_lpips = lpips.im2tensor(degraded_image)
 
             if args.use_gpu:
                 clean_lpips.cuda()
