@@ -1,11 +1,15 @@
 from math import log10, sqrt
 
+import lpips
 import numpy as np
+import torch
 
 
-def psnr(clean: np.ndarray, degraded: np.ndarray, max_pixel: float = 255.0) -> float:
+def evaluate_psnr(
+    clean: np.ndarray, degraded: np.ndarray, max_pixel: float = 255.0
+) -> float:
     """
-    Calculates PSNR between two images.
+    Evaluates PSNR between two images.
 
     Parameters:
         clean (np.ndarray):
@@ -25,20 +29,21 @@ def psnr(clean: np.ndarray, degraded: np.ndarray, max_pixel: float = 255.0) -> f
     return psnr
 
 
-def rgb_to_grayscale(rgb_image: np.ndarray) -> np.ndarray:
+def evaluate_lpips(
+    image0: torch.Tensor, image1: torch.Tensor, spatial: bool = False
+) -> float:
     """
-    Converts a RGB image to grayscale using Rec. 601 luma weights.
+    Evaluates LPIPS between two images.
 
     Parameters:
-        rgb_image (np.ndarray):
-            RGB image to convert.
+        image0 (torch.Tensor):
+            Image to compare in torch tensor format
+        image1 (torch.Tensor):
+            Image to compare in torch tensor format
 
     Returns:
-        grayscale_image (np.ndarray):
-            Converted image.
+        d (float): LPIPS distance between `image0` and `image1`.
     """
-    weights = np.array([0.299, 0.587, 0.114])
-
-    # remove alpha channel from image
-    grayscale_image = np.dot(rgb_image[..., :3], weights)
-    return grayscale_image
+    loss_fn = lpips.LPIPS(net="alex", spatial=spatial)
+    d = loss_fn.forward(image0, image1)
+    return d
