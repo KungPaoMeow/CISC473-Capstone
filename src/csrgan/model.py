@@ -28,23 +28,34 @@ class UpscaleModel(nn.Module):
         mapping_layers = []
         for _ in range(m):
             mapping_layers.append(nn.Conv2d(s, s, kernel_size=3, padding=3 // 2))
+            mapping_layers.append(nn.PReLU(s))
         self.mapping = nn.Sequential(*mapping_layers)
 
         # expanding
-        self.expanding = nn.Sequential(nn.Conv2d(s, d, kernel_size=1), nn.PReLU(d))
+        # self.expanding = nn.Sequential(nn.Conv2d(s, d, kernel_size=1), nn.PReLU(d))
 
         # upscale with deconvolution + pixel shuffle
         out_channels = num_channels * scale_factor**2
         self.upscale = nn.Sequential(
-            nn.Conv2d(d, out_channels, kernel_size=1),
-            nn.PReLU(out_channels),
+            nn.Conv2d(s, out_channels, kernel_size=1),
             nn.PixelShuffle(scale_factor),
         )
+        self._initialize_weights()
 
     def forward(self, x):
         extracted = self.feature_extraction(x)
         shrunk = self.shrinking(extracted)
         mapped = self.mapping(shrunk)
-        expanded = self.expanding(mapped)
-        upscaled = self.upscale(expanded)
+        # expanded = self.expanding(mapped)
+        upscaled = self.upscale(mapped)
         return upscaled
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                # Kaiming Normal balances variance across un-normalized deep structures
+                nn.init.kaiming_normal_(
+                    m.weight, mode="fan_in", nonlinearity="leaky_relu"
+                )
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)

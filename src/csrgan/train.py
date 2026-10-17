@@ -5,6 +5,7 @@ import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
 from PIL import Image
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from ..utils.metrics import evaluate_psnr_torch
@@ -34,6 +35,9 @@ class Div2kDataset(Dataset):
 
         self.lr_filenames = sorted(os.listdir(lr_dir))
         self.hr_filenames = sorted(os.listdir(hr_dir))
+        if not train:
+            self.lr_filenames = self.lr_filenames[:10]
+            self.hr_filenames = self.hr_filenames[:10]
 
         assert len(self.lr_filenames) == len(self.hr_filenames), (
             f"Mismatch: found {len(self.lr_filenames)} LR images but {len(self.hr_filenames)} HR images."
@@ -107,7 +111,9 @@ def get_datasets(patch_size, batch_size, scale_factor=2):
 
 
 # train loop
-def train_loop(dataloader: DataLoader, model, loss_lpips: lpips.LPIPS, optimizer):
+def train_loop(
+    dataloader: DataLoader, model, loss_fn_lpips: lpips.LPIPS, loss_fn_pixel, optimizer
+):
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     model.train()
@@ -116,47 +122,52 @@ def train_loop(dataloader: DataLoader, model, loss_lpips: lpips.LPIPS, optimizer
         X = X.to(device)
         y = y.to(device)
         pred = model(X)
-        loss = loss_lpips.forward(pred, y).mean()
+
+        # loss = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean()
+        loss = loss_fn_pixel(pred, y)
 
         # backpropagation
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
-        loss, current = loss.item(), batch * batch_size + len(X)
-        print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+        if batch % 10 == 0:
+            print(
+                f"loss: {loss.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
+            )
 
 
 # test loop
-def test_loop(dataloader, model, loss_lpips: lpips.LPIPS):
+def test_loop(dataloader, model, loss_fn_lpips: lpips.LPIPS):
     model.eval()
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
-    test_loss = 0
+    lpips_loss = 0
+    psnr = 0
 
     with torch.no_grad():
         for X, y in dataloader:
             X = X.to(device)
             y = y.to(device)
             pred = model(X)
-            test_loss += loss_lpips.forward(pred, y).mean()
+            pred = torch.clamp(pred, min=0.0, max=1.0)
+            lpips_loss += loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean().item()
 
+            pred_gray = rgb_to_grayscale_torch(pred)
+            y_gray = rgb_to_grayscale_torch(y)
             # evaluate psnr
-            psnr = 0
-            evaluate_psnr_torch(pred, y)
-            psnr /= size
-
-    test_loss /= num_batches
-    print(
-        # f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n"
-    )
+            psnr += evaluate_psnr_torch(pred_gray, y_gray)
+    psnr /= num_batches
+    lpips_loss /= num_batches
+    print(f"average LPIPS loss: {lpips_loss}")
+    print(f"average PSNR: {psnr}")
 
 
 def __main__():
     scale_factor = 2
     learning_rate = 1e-3
     batch_size = 64
-    epochs = 2
+    epochs = 5
 
     patch_size = 64
 
@@ -169,14 +180,17 @@ def __main__():
     model = UpscaleModel(scale_factor=scale_factor).to(device)
 
     loss_fn_vgg = lpips.LPIPS(net="vgg").cuda()
+    loss_fn_pixel = nn.L1Loss().to(device)
 
     # hyperparameters
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     for t in range(epochs):
         print(f"Epoch {t + 1}\n-------------------------------")
-        train_loop(train_dataloader, model, loss_fn_vgg, optimizer)
+        print("TRAINING")
+        train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer)
+        print("\nTESTING")
         test_loop(test_dataloader, model, loss_fn_vgg)
 
 
