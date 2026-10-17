@@ -42,15 +42,9 @@ class UpscaleModel(nn.Module):
         )
 
     def forward(self, x):
-        print("CHYME1")
         extracted = self.feature_extraction(x)
-        print("CHYME2")
         shrunk = self.shrinking(extracted)
-        print("CHYME3")
         mapped = self.mapping(shrunk)
-        print("CHYME4")
         expanded = self.expanding(mapped)
-        print("CHYME5")
         upscaled = self.upscale(expanded)
-        print("CHYME6")
         return upscaled

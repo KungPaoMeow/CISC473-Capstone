@@ -1,30 +1,184 @@
+import os
+
 import lpips
-import numpy as np
 import torch
-from torch import nn
+import torchvision.transforms as T
+import torchvision.transforms.functional as F
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 
+from ..utils.metrics import evaluate_psnr_torch
+from ..utils.utils import rgb_to_grayscale_torch
 from .model import UpscaleModel
-
-# load data
-data_dir = ""
-x_train = np.load(data_dir)
-print(f"shape of training data: {x_train.shape}")
-print(f"data type: {type(x_train)}")
 
 device = (
     torch.accelerator.current_accelerator().type
     if torch.accelerator.is_available()
     else "cpu"
 )
-print(f"Using {device} device")
 
-model = UpscaleModel().to(device)
-print(model)
 
-x = torch.zeros(1, 3, 40, 40).to(device)
-y = torch.ones(1, 3, 80, 80).to(device)
-output = model(x)
+class Div2kDataset(Dataset):
+    def __init__(self, lr_dir, hr_dir, patch_size=None, train=True):
+        """
+        Args:
+            lr_dir (str): Path to Low-Resolution folder
+            hr_dir (str): Path to High-Resolution folder
+            patch_size (int): Size of the LR patch (if cropping during training)
+            train (bool): Toggle for training vs validation behaviors
+        """
+        self.lr_dir = lr_dir
+        self.hr_dir = hr_dir
+        self.patch_size = patch_size
+        self.is_train = train
 
-loss_fn_vgg = lpips.LPIPS(net="vgg").cuda()
-loss_perceptual = loss_fn_vgg.forward(output, y)
-print(loss_perceptual)
+        self.lr_filenames = sorted(os.listdir(lr_dir))
+        self.hr_filenames = sorted(os.listdir(hr_dir))
+
+        assert len(self.lr_filenames) == len(self.hr_filenames), (
+            f"Mismatch: found {len(self.lr_filenames)} LR images but {len(self.hr_filenames)} HR images."
+        )
+
+    def __len__(self):
+        return len(self.lr_filenames)
+
+    def __getitem__(self, idx):
+        lr_path = os.path.join(self.lr_dir, self.lr_filenames[idx])
+        hr_path = os.path.join(self.hr_dir, self.hr_filenames[idx])
+        lr_image = Image.open(lr_path).convert("RGB")
+        hr_image = Image.open(hr_path).convert("RGB")
+
+        if self.is_train and self.patch_size is not None:
+            # crop images to patch size
+            # calculate upscale factor
+            scale = hr_image.size[0] // lr_image.size[0]
+
+            lr_width, lr_height = lr_image.size
+            # select a top-left starting coordinate on the LR image
+            x = torch.randint(0, lr_width - self.patch_size + 1, (1,)).item()
+            y = torch.randint(0, lr_height - self.patch_size + 1, (1,)).item()
+
+            # crop LR image
+            lr_image = F.crop(lr_image, y, x, self.patch_size, self.patch_size)
+            # crop HR image to match the cropped LR image
+            hr_image = F.crop(
+                hr_image,
+                y * scale,
+                x * scale,
+                self.patch_size * scale,
+                self.patch_size * scale,
+            )
+
+        # transform to Pytorch Tensors
+        lr_tensor = F.to_tensor(lr_image)
+        hr_tensor = F.to_tensor(hr_image)
+
+        return lr_tensor, hr_tensor
+
+
+def get_datasets(patch_size, batch_size, scale_factor=2):
+    training_data = Div2kDataset(
+        f"datasets/DIV2K_train_LR_bicubic/X{scale_factor}",
+        "datasets/DIV2K_train_HR",
+        patch_size,
+        train=True,
+    )
+    testing_data = Div2kDataset(
+        f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
+        "datasets/DIV2K_valid_HR",
+        train=False,
+    )
+
+    train_dataloader = DataLoader(
+        dataset=training_data,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    test_dataloader = DataLoader(
+        dataset=testing_data,
+        batch_size=1,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+    return train_dataloader, test_dataloader
+
+
+# train loop
+def train_loop(dataloader: DataLoader, model, loss_lpips: lpips.LPIPS, optimizer):
+    size = len(dataloader.dataset)
+    batch_size = dataloader.batch_size
+    model.train()
+    for batch, (X, y) in enumerate(dataloader):
+        # compute prediction and loss
+        X = X.to(device)
+        y = y.to(device)
+        pred = model(X)
+        loss = loss_lpips.forward(pred, y).mean()
+
+        # backpropagation
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        loss, current = loss.item(), batch * batch_size + len(X)
+        print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+
+# test loop
+def test_loop(dataloader, model, loss_lpips: lpips.LPIPS):
+    model.eval()
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    test_loss = 0
+
+    with torch.no_grad():
+        for X, y in dataloader:
+            X = X.to(device)
+            y = y.to(device)
+            pred = model(X)
+            test_loss += loss_lpips.forward(pred, y).mean()
+
+            # evaluate psnr
+            psnr = 0
+            evaluate_psnr_torch(pred, y)
+            psnr /= size
+
+    test_loss /= num_batches
+    print(
+        # f"Test Error: \n Accuracy: {(100 * correct):>0.1f}%, Avg loss: {test_loss:>8f} \n"
+    )
+
+
+def __main__():
+    scale_factor = 2
+    learning_rate = 1e-3
+    batch_size = 64
+    epochs = 2
+
+    patch_size = 64
+
+    train_dataloader, test_dataloader = get_datasets(
+        patch_size=patch_size, batch_size=batch_size, scale_factor=scale_factor
+    )
+
+    print(f"Using {device} device")
+
+    model = UpscaleModel(scale_factor=scale_factor).to(device)
+
+    loss_fn_vgg = lpips.LPIPS(net="vgg").cuda()
+
+    # hyperparameters
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    for t in range(epochs):
+        print(f"Epoch {t + 1}\n-------------------------------")
+        train_loop(train_dataloader, model, loss_fn_vgg, optimizer)
+        test_loop(test_dataloader, model, loss_fn_vgg)
+
+
+if __name__ == "__main__":
+    __main__()

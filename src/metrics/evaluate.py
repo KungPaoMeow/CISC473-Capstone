@@ -10,8 +10,8 @@ import cv2
 import lpips
 from loguru import logger
 
-from .metrics import evaluate_lpips, evaluate_psnr
-from .utils import rgb_to_grayscale
+from ..utils.metrics import evaluate_lpips, evaluate_psnr
+from ..utils.utils import rgb_to_grayscale
 
 """
 Command line program to evaluate PSNR and LPIPS on datasets of images, one clean copy and one degraded copy per image.
