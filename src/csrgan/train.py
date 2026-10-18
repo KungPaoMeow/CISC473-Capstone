@@ -1,8 +1,8 @@
 import os
 
 import lpips
+import matplotlib.pyplot as plt
 import torch
-import torchvision.transforms as T
 import torchvision.transforms.functional as F
 from PIL import Image
 from torch import nn
@@ -36,8 +36,8 @@ class Div2kDataset(Dataset):
         self.lr_filenames = sorted(os.listdir(lr_dir))
         self.hr_filenames = sorted(os.listdir(hr_dir))
         if not train:
-            self.lr_filenames = self.lr_filenames[:10]
-            self.hr_filenames = self.hr_filenames[:10]
+            self.lr_filenames = self.lr_filenames[:30]
+            self.hr_filenames = self.hr_filenames[:30]
 
         assert len(self.lr_filenames) == len(self.hr_filenames), (
             f"Mismatch: found {len(self.lr_filenames)} LR images but {len(self.hr_filenames)} HR images."
@@ -123,28 +123,35 @@ def train_loop(
         y = y.to(device)
         pred = model(X)
 
-        # loss = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean()
-        loss = loss_fn_pixel(pred, y)
+        loss_lpips = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean()
+        loss_pixel = loss_fn_pixel(pred, y)
 
+        loss_combined = loss_lpips + loss_pixel
         # backpropagation
-        loss.backward()
+        loss_combined.backward()
         optimizer.step()
         optimizer.zero_grad()
 
         if batch % 10 == 0:
             print(
-                f"loss: {loss.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
+                f"pixel loss: {loss_pixel.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
+            )
+            print(
+                f"LPIPS distance: {loss_lpips.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
+            )
+            print(
+                f"loss: {loss_combined.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
             )
 
 
 # test loop
 def test_loop(dataloader, model, loss_fn_lpips: lpips.LPIPS):
     model.eval()
-    size = len(dataloader.dataset)
     num_batches = len(dataloader)
     lpips_loss = 0
     psnr = 0
 
+    images = []
     with torch.no_grad():
         for X, y in dataloader:
             X = X.to(device)
@@ -157,17 +164,28 @@ def test_loop(dataloader, model, loss_fn_lpips: lpips.LPIPS):
             y_gray = rgb_to_grayscale_torch(y)
             # evaluate psnr
             psnr += evaluate_psnr_torch(pred_gray, y_gray)
+
+            images.append(pred)
     psnr /= num_batches
     lpips_loss /= num_batches
-    print(f"average LPIPS loss: {lpips_loss}")
+    print(f"average LPIPS distance: {lpips_loss}")
     print(f"average PSNR: {psnr}")
+
+    return images
+
+
+def display_images(images: list[torch.Tensor]):
+    for image in images:
+        print(f"shape of image: {image.shape}")
+        plt.imshow(image.permute(2, 3, 1, 0).cpu().numpy().squeeze())
+        plt.show()
 
 
 def __main__():
     scale_factor = 2
     learning_rate = 1e-3
     batch_size = 64
-    epochs = 5
+    epochs = 30
 
     patch_size = 64
 
@@ -179,19 +197,20 @@ def __main__():
 
     model = UpscaleModel(scale_factor=scale_factor).to(device)
 
-    loss_fn_vgg = lpips.LPIPS(net="vgg").cuda()
+    loss_fn_vgg = lpips.LPIPS(net="vgg").to(device)
     loss_fn_pixel = nn.L1Loss().to(device)
 
-    # hyperparameters
-
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
+    all_images = []
     for t in range(epochs):
         print(f"Epoch {t + 1}\n-------------------------------")
         print("TRAINING")
         train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer)
-        print("\nTESTING")
-        test_loop(test_dataloader, model, loss_fn_vgg)
+        if (t + 1) % 10 == 0 or t == epochs - 1:
+            print("\nTESTING")
+            all_images.append(test_loop(test_dataloader, model, loss_fn_vgg))
+
+    display_images(all_images[-1])
 
 
 if __name__ == "__main__":

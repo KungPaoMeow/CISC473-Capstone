@@ -32,12 +32,12 @@ class UpscaleModel(nn.Module):
         self.mapping = nn.Sequential(*mapping_layers)
 
         # expanding
-        # self.expanding = nn.Sequential(nn.Conv2d(s, d, kernel_size=1), nn.PReLU(d))
+        self.expanding = nn.Sequential(nn.Conv2d(s, d, kernel_size=1), nn.PReLU(d))
 
         # upscale with deconvolution + pixel shuffle
         out_channels = num_channels * scale_factor**2
         self.upscale = nn.Sequential(
-            nn.Conv2d(s, out_channels, kernel_size=1),
+            nn.Conv2d(d, out_channels, kernel_size=1),
             nn.PixelShuffle(scale_factor),
         )
         self._initialize_weights()
@@ -46,8 +46,8 @@ class UpscaleModel(nn.Module):
         extracted = self.feature_extraction(x)
         shrunk = self.shrinking(extracted)
         mapped = self.mapping(shrunk)
-        # expanded = self.expanding(mapped)
-        upscaled = self.upscale(mapped)
+        expanded = self.expanding(mapped)
+        upscaled = self.upscale(expanded)
         return upscaled
 
     def _initialize_weights(self):
