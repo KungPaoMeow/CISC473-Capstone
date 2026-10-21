@@ -40,15 +40,17 @@ class UpscaleModel(nn.Module):
             nn.Conv2d(d, out_channels, kernel_size=1),
             nn.PixelShuffle(scale_factor),
         )
+
         self._initialize_weights()
+        print(f"number of parameters in model: {self.calculate_num_params()}")
 
     def forward(self, x):
-        extracted = self.feature_extraction(x)
-        shrunk = self.shrinking(extracted)
-        mapped = self.mapping(shrunk)
-        expanded = self.expanding(mapped)
-        upscaled = self.upscale(expanded)
-        return upscaled
+        x = self.feature_extraction(x)
+        x = self.shrinking(x)
+        x = self.mapping(x)
+        x = self.expanding(x)
+        x = self.upscale(x)
+        return x
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -59,3 +61,7 @@ class UpscaleModel(nn.Module):
                 )
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+    def calculate_num_params(self):
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total_params

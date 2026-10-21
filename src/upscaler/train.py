@@ -2,6 +2,7 @@ import os
 
 import lpips
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torchvision.transforms.functional as F
 from PIL import Image
@@ -9,7 +10,6 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from ..utils.metrics import evaluate_psnr_torch
-from ..utils.utils import rgb_to_grayscale_torch
 from .model import UpscaleModel
 
 device = (
@@ -20,24 +20,27 @@ device = (
 
 
 class Div2kDataset(Dataset):
-    def __init__(self, lr_dir, hr_dir, patch_size=None, train=True):
+    def __init__(
+        self, lr_dir, hr_dir, patch_size=None, train=True, max_size: int | None = None
+    ):
         """
         Args:
             lr_dir (str): Path to Low-Resolution folder
             hr_dir (str): Path to High-Resolution folder
             patch_size (int): Size of the LR patch (if cropping during training)
             train (bool): Toggle for training vs validation behaviors
+            max_size (int | None): If not `None`, takes the first `max_size` images from the dataset
         """
         self.lr_dir = lr_dir
         self.hr_dir = hr_dir
         self.patch_size = patch_size
         self.is_train = train
 
-        self.lr_filenames = sorted(os.listdir(lr_dir))
-        self.hr_filenames = sorted(os.listdir(hr_dir))
-        if not train:
-            self.lr_filenames = self.lr_filenames[:30]
-            self.hr_filenames = self.hr_filenames[:30]
+        self.lr_filenames = np.array(sorted(os.listdir(lr_dir)))
+        self.hr_filenames = np.array(sorted(os.listdir(hr_dir)))
+        if max_size is not None:
+            self.lr_filenames = self.lr_filenames[:max_size]
+            self.hr_filenames = self.hr_filenames[:max_size]
 
         assert len(self.lr_filenames) == len(self.hr_filenames), (
             f"Mismatch: found {len(self.lr_filenames)} LR images but {len(self.hr_filenames)} HR images."
@@ -80,7 +83,7 @@ class Div2kDataset(Dataset):
         return lr_tensor, hr_tensor
 
 
-def get_datasets(patch_size, batch_size, scale_factor=2):
+def get_train_and_test_datasets(patch_size, batch_size, scale_factor=2):
     training_data = Div2kDataset(
         f"datasets/DIV2K_train_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_train_HR",
@@ -91,6 +94,7 @@ def get_datasets(patch_size, batch_size, scale_factor=2):
         f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_valid_HR",
         train=False,
+        max_size=5,
     )
 
     train_dataloader = DataLoader(
@@ -112,13 +116,16 @@ def get_datasets(patch_size, batch_size, scale_factor=2):
 
 # train loop
 def train_loop(
-    dataloader: DataLoader, model, loss_fn_lpips: lpips.LPIPS, loss_fn_pixel, optimizer
+    dataloader: DataLoader,
+    model: nn.Module,
+    loss_fn_lpips: lpips.LPIPS,
+    loss_fn_pixel,
+    optimizer,
 ):
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     model.train()
     for batch, (X, y) in enumerate(dataloader):
-        # compute prediction and loss
         X = X.to(device)
         y = y.to(device)
         pred = model(X)
@@ -145,40 +152,51 @@ def train_loop(
 
 
 # test loop
-def test_loop(dataloader, model, loss_fn_lpips: lpips.LPIPS):
+def test_loop(
+    dataloader: DataLoader,
+    model: nn.Module,
+    loss_fn_lpips: lpips.LPIPS,
+    display: bool = False,
+):
     model.eval()
     num_batches = len(dataloader)
     lpips_loss = 0
     psnr = 0
 
-    images = []
     with torch.no_grad():
-        for X, y in dataloader:
+        for i, (X, y) in enumerate(dataloader):
             X = X.to(device)
             y = y.to(device)
+
             pred = model(X)
-            pred = torch.clamp(pred, min=0.0, max=1.0)
-            lpips_loss += loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean().item()
 
-            pred_gray = rgb_to_grayscale_torch(pred)
-            y_gray = rgb_to_grayscale_torch(y)
-            # evaluate psnr
-            psnr += evaluate_psnr_torch(pred_gray, y_gray)
+            # compute LPIPS loss
+            lpips_single = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean().item()
 
-            images.append(pred)
+            # compute PSNR
+            pred_gray = pred[:, 0, :, :]
+            y_gray = y[:, 0, :, :]
+            psnr_single = evaluate_psnr_torch(pred_gray, y_gray)
+
+            lpips_loss += lpips_single
+            psnr += psnr_single
+
+            if display:
+                print(f"IMAGE {i}")
+                print(f"LPIPS distance: {lpips_loss:>4f}")
+                print(f"PSNR: {psnr:>2f}")
+                plt.imshow(pred.permute(2, 3, 1, 0).cpu().numpy().squeeze())
+                plt.show()
+                print()
     psnr /= num_batches
     lpips_loss /= num_batches
-    print(f"average LPIPS distance: {lpips_loss}")
-    print(f"average PSNR: {psnr}")
-
-    return images
+    print(f"average LPIPS distance: {lpips_loss:>4f}")
+    print(f"average PSNR: {psnr:>2f}")
 
 
-def display_images(images: list[torch.Tensor]):
-    for image in images:
-        print(f"shape of image: {image.shape}")
-        plt.imshow(image.permute(2, 3, 1, 0).cpu().numpy().squeeze())
-        plt.show()
+def save_model(model, file_path, file_name):
+    os.makedirs(file_path, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(file_path, file_name))
 
 
 def __main__():
@@ -189,7 +207,7 @@ def __main__():
 
     patch_size = 64
 
-    train_dataloader, test_dataloader = get_datasets(
+    train_dataloader, test_dataloader = get_train_and_test_datasets(
         patch_size=patch_size, batch_size=batch_size, scale_factor=scale_factor
     )
 
@@ -201,16 +219,33 @@ def __main__():
     loss_fn_pixel = nn.L1Loss().to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    all_images = []
+
     for t in range(epochs):
         print(f"Epoch {t + 1}\n-------------------------------")
         print("TRAINING")
         train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer)
-        if (t + 1) % 10 == 0 or t == epochs - 1:
+        if t == epochs - 1:
             print("\nTESTING")
-            all_images.append(test_loop(test_dataloader, model, loss_fn_vgg))
+            test_loop(test_dataloader, model, loss_fn_vgg)
+        print()
 
-    display_images(all_images[-1])
+    save_model(model, "models", "model.pth")
+
+    # evaluate and output images
+    eval_data = Div2kDataset(
+        f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
+        "datasets/DIV2K_valid_HR",
+        train=False,
+        max_size=5,
+    )
+    eval_dataloader = DataLoader(
+        dataset=eval_data,
+        batch_size=1,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+    test_loop(eval_dataloader, model, loss_fn_vgg, display=True)
 
 
 if __name__ == "__main__":

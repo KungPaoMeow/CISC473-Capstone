@@ -25,7 +25,7 @@ def rgb_to_grayscale(rgb_image: np.ndarray) -> np.ndarray:
 
 def rgb_to_grayscale_torch(rgb_image: torch.Tensor) -> torch.Tensor:
     """
-    Converts RGB prediction and label tensors of shape [B, 3, X, Y] to grayscale using Rec. 601 luma weights.
+    Converts an RGB tensor of shape [B, 3, X, Y] to grayscale using Rec. 601 luma weights.
 
     Parameters:
         rgb_image (torch.Tensor): RGB tensor of shape [B, 3, X, Y]
@@ -46,3 +46,77 @@ def rgb_to_grayscale_torch(rgb_image: torch.Tensor) -> torch.Tensor:
     )
 
     return grayscale_image
+
+
+def rgb_to_ycbcr(rgb_image: np.ndarray) -> np.ndarray:
+    weights = np.array([
+        [ 0.299,     0.587,     0.114   ],
+        [-0.168736, -0.331264,  0.5     ],
+        [ 0.5,      -0.418688, -0.081312]
+    ])
+
+    ycbcr_image = rgb_image @ weights.T
+    return ycbcr_image
+
+def ycbcr_to_rgb(ycbcr_image: np.ndarray) -> np.ndarray:
+    weights = np.array([
+        [ 0.299,     0.587,     0.114   ],
+        [-0.168736, -0.331264,  0.5     ],
+        [ 0.5,      -0.418688, -0.081312]
+    ])
+    inverse_weights = np.linalg.inv(weights)
+
+    rgb_image = ycbcr_image @ inverse_weights.T
+    return rgb_image
+
+
+def ycbcr_to_rgb_torch(ycbcr_image: torch.Tensor) -> torch.Tensor:
+    """
+        Converts a YCbCr tensor of shape [B, 3, X, Y] to RGB
+    
+        Parameters:
+            ycbcr_image (torch.Tensor): YCrCb tensor of shape [B, 3, X, Y]
+    
+        Returns:
+            rgb_image (torch.Tensor): RGB tensor of shape [B, 3, X, Y]
+    """
+    weights = torch.tensor([
+        [ 0.299,      0.587,      0.114    ],
+        [-0.168736,  -0.331264,   0.5      ],
+        [ 0.5,       -0.418688,  -0.081312 ]
+    ], dtype=ycbcr_image.dtype, device=ycbcr_image.device)
+
+    inverse_weights = torch.linalg.inv(weights)
+
+    # [B, 3, X, Y] -> [B, X, Y, 3]
+    ycbcr_image = ycbcr_image.permute(0, 2, 3, 1)
+
+    rgb_image = ycbcr_image @ inverse_weights.T
+
+    # [B, X, Y, 3] -> [B, 3, X, Y]
+    return rgb_image.permute(0, 3, 1, 2)
+
+def rgb_to_ycrcb_torch(ycbcr_image: torch.Tensor) -> torch.Tensor:
+    """
+        Converts a YCbCr tensor of shape [3, X, Y] to RGB
+    
+        Parameters:
+            ycbcr_image (torch.Tensor): YCrCb tensor of shape [B, 3, X, Y]
+    
+        Returns:
+            rgb_image (torch.Tensor): RGB tensor of shape [B, 3, X, Y]
+    """
+    weights = torch.tensor([
+        [ 0.299,      0.587,      0.114    ],
+        [-0.168736,  -0.331264,   0.5      ],
+        [ 0.5,       -0.418688,  -0.081312 ]
+    ], dtype=ycbcr_image.dtype, device=ycbcr_image.device)
+
+
+    # [3, X, Y] -> [X, Y, 3]
+    ycbcr_image = ycbcr_image.permute(1, 2, 0)
+
+    rgb_image = ycbcr_image @ weights.T
+
+    # [X, Y, 3] -> [3, X, Y]
+    return rgb_image.permute(2, 0, 1)
