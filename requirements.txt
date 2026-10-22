@@ -21,14 +21,14 @@ nvidia-cuda-nvrtc==13.0.88
 nvidia-cuda-runtime==13.0.96
 nvidia-cudnn-cu13==9.24.0.43
 nvidia-cufft==12.0.0.61
-nvidia-cufile==1.15.1.6
+# nvidia-cufile==1.15.1.6
 nvidia-curand==10.4.0.35
 nvidia-cusolver==12.0.4.66
 nvidia-cusparse==12.6.3.3
 nvidia-cusparselt-cu13==0.8.1
-nvidia-nccl-cu13==2.30.7
+# nvidia-nccl-cu13==2.30.7
 nvidia-nvjitlink==13.4.92
-nvidia-nvshmem-cu13==3.4.5
+# nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 opencv-python==5.0.0.93
 packaging==26.3
@@ -42,5 +42,5 @@ sympy==1.14.0
 torch==2.14.1
 torchvision==0.29.1
 tqdm==4.70.1
-triton==3.8.0
+# triton==3.8.0
 typing_extensions==4.16.0

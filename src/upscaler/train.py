@@ -1,21 +1,29 @@
 import os
 
 import lpips
+import matplotlib.pyplot as plt
+from PIL import Image
 import numpy as np
 import torch
-import torchvision.transforms.functional as F
-from PIL import Image
 from torch import nn
+import torchvision.transforms.functional as F
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from ..utils.metrics import evaluate_psnr_torch
 from .model import UpscaleModel
 
-device = (
-    torch.accelerator.current_accelerator().type
-    if torch.accelerator.is_available()
-    else "cpu"
-)
+IS_DISTRIBUTED = "LOCAL_RANK" in os.environ and torch.accelerator.is_available()
+
+if IS_DISTRIBUTED:
+    torch.distributed.init_process_group(backend="nccl")    # NVIDIA Collective Communications Library for GPU communication
+    LOCAL_RANK = int(os.environ["LOCAL_RANK"])              # device ID of GPU executing this script
+    IS_MASTER = (LOCAL_RANK == 0)
+    device = f"{torch.accelerator.current_accelerator().type}:{LOCAL_RANK}"
+    torch.cuda.set_device(device)
+else:
+    IS_MASTER = True
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
 
 class Div2kDataset(Dataset):
@@ -120,7 +128,11 @@ def train_loop(
     loss_fn_lpips: lpips.LPIPS,
     loss_fn_pixel,
     optimizer,
+    epoch
 ):
+    if isinstance(dataloader.sampler, DistributedSampler):
+        dataloader.sampler.set_epoch(epoch)
+    
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     model.train()
@@ -212,9 +224,15 @@ def __main__():
         patch_size=patch_size, batch_size=batch_size, scale_factor=scale_factor
     )
 
+    if IS_DISTRIBUTED:
+        print("Using distributed multi-GPU environment")
     print(f"Using {device} device")
 
     model = UpscaleModel(scale_factor=scale_factor).to(device)
+    if IS_DISTRIBUTED:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
+
 
     loss_fn_vgg = lpips.LPIPS(net="vgg").to(device)
     loss_fn_pixel = nn.L1Loss().to(device)
@@ -224,29 +242,34 @@ def __main__():
     for t in range(epochs):
         print(f"Epoch {t + 1}\n-------------------------------")
         print("TRAINING")
-        train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer)
+        train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, epoch=t)
         if t == epochs - 1:
             print("\nTESTING")
             test_loop(test_dataloader, model, loss_fn_vgg)
         print()
 
-    save_model(model, "models", "model.pth")
+    if IS_MASTER:
+        model_to_save = model.module if IS_DISTRIBUTED else model   # DDP model weights in .module
+        save_model(model_to_save, "models", "model.pth")
 
-    # evaluate and output images
-    eval_data = Div2kDataset(
-        f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
-        "datasets/DIV2K_valid_HR",
-        train=False,
-        max_size=5,
-    )
-    eval_dataloader = DataLoader(
-        dataset=eval_data,
-        batch_size=1,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
-    )
-    test_loop(eval_dataloader, model, loss_fn_vgg, display=True)
+        # evaluate and output images
+        eval_data = Div2kDataset(
+            f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
+            "datasets/DIV2K_valid_HR",
+            train=False,
+            max_size=5,
+        )
+        eval_dataloader = DataLoader(
+            dataset=eval_data,
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True,
+        )
+        test_loop(eval_dataloader, model, loss_fn_vgg, display=True)
+
+    if IS_DISTRIBUTED:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
