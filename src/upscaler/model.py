@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-
+import torch.nn.functional as F
 
 class UpscaleModel(nn.Module):
     """
@@ -17,7 +17,7 @@ class UpscaleModel(nn.Module):
             ),
             nn.PReLU(d),
         )
-
+        self.scale_factor = scale_factor
         # shrinking
         self.shrinking = nn.Sequential(
             nn.Conv2d(d, s, kernel_size=1),
@@ -45,12 +45,20 @@ class UpscaleModel(nn.Module):
         print(f"number of parameters in model: {self.calculate_num_params()}")
 
     def forward(self, x):
-        x = self.feature_extraction(x)
-        x = self.shrinking(x)
-        x = self.mapping(x)
-        x = self.expanding(x)
-        x = self.upscale(x)
-        return x
+        baseline = F.interpolate(
+            x,
+            scale_factor=self.scale_factor,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        features = self.feature_extraction(x)
+        features = self.shrinking(features)
+        features = self.mapping(features)
+        features = self.expanding(features)
+        residual = self.upscale(features)
+
+        return baseline + residual
 
     def _initialize_weights(self):
         for m in self.modules():
