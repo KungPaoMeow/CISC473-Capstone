@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import lpips
+import matplotlib.pyplot as plt
 from loguru import logger
 
 from ..utils.metrics import evaluate_lpips, evaluate_psnr
@@ -86,6 +87,13 @@ def parse_arguments():
         "-v", "--verbose", action="store_true", help="Adds additional output."
     )
 
+    parser.add_argument(
+        "-n",
+        "--no-display",
+        action="store_true",
+        help="Disables displaying of histograms for individual datasets",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -97,14 +105,52 @@ def main():
     rootdir = Path(args.input_dir)
     dataset_list = [d for d in rootdir.iterdir() if d.is_dir()]
 
-    psnr_all = []
-    lpips_all = []
-    psnr_max_all = 0
-    psnr_min_all = float("inf")
-    lpips_max_all = 0
-    lpips_min_all = float("inf")
+    psnr_dict = {
+        "2x": [],
+        "3x": [],
+        "4x": [],
+    }
+    lpips_dict = {
+        "2x": [],
+        "3x": [],
+        "4x": [],
+    }
+
+    psnr_max = {
+        "2x": 0,
+        "3x": 0,
+        "4x": 0,
+    }
+    psnr_min = {
+        "2x": float("inf"),
+        "3x": float("inf"),
+        "4x": float("inf"),
+    }
+
+    lpips_max = {
+        "2x": 0,
+        "3x": 0,
+        "4x": 0,
+    }
+    lpips_min = {
+        "2x": float("inf"),
+        "3x": float("inf"),
+        "4x": float("inf"),
+    }
+
+    with lpips_gag():
+        loss_fn_lpips = lpips.LPIPS(net="vgg", spatial=args.spatial)
+        if args.use_gpu:
+            loss_fn_lpips = loss_fn_lpips.cuda()
 
     for dataset in dataset_list:
+        scale_factor = (
+            2
+            if "2x" in dataset.stem or "x2" in dataset.stem
+            else 3
+            if "3x" in dataset.stem or "x3" in dataset.stem
+            else 4
+        )
         clean_dir = Path(f"{dataset}/{args.clean_dir}")
         degraded_dir = Path(f"{dataset}/{args.degraded_dir}")
 
@@ -130,8 +176,10 @@ def main():
                 degraded_filepath = Path(f"{degraded_dir}/{degraded_filename}")
 
             # get images
-            clean_image = cv2.imread(clean_filename)
-            degraded_image = cv2.imread(degraded_filepath)
+            clean_image = cv2.cvtColor(cv2.imread(clean_filename), cv2.COLOR_BGR2RGB)
+            degraded_image = cv2.cvtColor(
+                cv2.imread(degraded_filepath), cv2.COLOR_BGR2RGB
+            )
 
             # If the clean image was downscaled by a non-divisor, then it's possible that the degraded image is smaller than the clean image.
             # slice excess off of the clean image
@@ -140,16 +188,16 @@ def main():
             ]
 
             # compute PSNR
-            clean_grayscale = rgb_to_grayscale(clean_image)
-            degraded_grayscale = rgb_to_grayscale(degraded_image)
+            clean_grayscale = cv2.cvtColor(clean_image, cv2.COLOR_RGB2GRAY)
+            degraded_grayscale = cv2.cvtColor(degraded_image, cv2.COLOR_RGB2GRAY)
 
-            psnr = evaluate_psnr(clean_grayscale, degraded_grayscale)
+            psnr = evaluate_psnr(clean_grayscale, degraded_grayscale, max_pixel=255)
 
-            psnr_max_all = max(psnr, psnr_max_all)
-            psnr_min_all = min(psnr, psnr_min_all)
+            psnr_max[f"{scale_factor}x"] = max(psnr, psnr_max[f"{scale_factor}x"])
+            psnr_min[f"{scale_factor}x"] = min(psnr, psnr_min[f"{scale_factor}x"])
             psnr_max_dataset = max(psnr, psnr_max_dataset)
             psnr_min_dataset = min(psnr, psnr_min_dataset)
-            psnr_all.append(psnr)
+            psnr_dict[f"{scale_factor}x"].append(psnr)
             psnr_dataset.append(psnr)
 
             # compute LPIPS
@@ -157,24 +205,25 @@ def main():
             degraded_lpips = lpips.im2tensor(degraded_image)
 
             if args.use_gpu:
-                clean_lpips.cuda()
-                degraded_lpips.cuda()
+                clean_lpips = clean_lpips.cuda()
+                degraded_lpips = degraded_lpips.cuda()
 
-            with lpips_gag():
-                lpips_distance = evaluate_lpips(
-                    clean_lpips, degraded_lpips, args.spatial
-                )
+            lpips_distance = evaluate_lpips(clean_lpips, degraded_lpips, loss_fn_lpips)
 
             if not args.spatial:
                 lpips_distance = lpips_distance.item()
             else:
-                lpips_distance = lpips_distance.mean()
+                lpips_distance = lpips_distance.mean().item()
 
-            lpips_max_all = max(lpips_distance, lpips_max_all)
-            lpips_min_all = min(lpips_distance, lpips_min_all)
+            lpips_max[f"{scale_factor}x"] = max(
+                lpips_distance, lpips_max[f"{scale_factor}x"]
+            )
+            lpips_min[f"{scale_factor}x"] = min(
+                lpips_distance, lpips_min[f"{scale_factor}x"]
+            )
             lpips_max_dataset = max(lpips_distance, lpips_max_dataset)
             lpips_min_dataset = min(lpips_distance, lpips_min_dataset)
-            lpips_all.append(lpips_distance)
+            lpips_dict[f"{scale_factor}x"].append(lpips_distance)
             lpips_dataset.append(lpips_distance)
 
             # output PSNR and LPIPS
@@ -192,8 +241,23 @@ def main():
         print(
             f"{dataset.stem} PSNR median: {round(statistics.median(psnr_dataset), 3)}"
         )
+        print(
+            f"{dataset.stem} PSNR variance: {round(statistics.variance(psnr_dataset), 3)}"
+        )
+        print(
+            f"{dataset.stem} PSNR standard deviation: {round(statistics.stdev(psnr_dataset), 3)}"
+        )
         print(f"{dataset.stem} PSNR max (best): {round(psnr_max_dataset, 3)}")
         print(f"{dataset.stem} PSNR min (worst): {round(psnr_min_dataset, 3)}\n")
+
+        if not args.no_display:
+            # PSNR histogram
+            plt.hist(psnr_dataset, min(50, 2 * len(psnr_dataset)))
+            plt.title(f"{dataset.stem} PSNR")
+            plt.xlabel("PSNR (dB)")
+            plt.ylabel("Number of images")
+            plt.show()
+            plt.close()
 
         print(
             f"{dataset.stem} LPIPS average: {round(statistics.fmean(lpips_dataset), 3)}"
@@ -201,20 +265,84 @@ def main():
         print(
             f"{dataset.stem} LPIPS median: {round(statistics.median(lpips_dataset), 3)}"
         )
+        print(
+            f"{dataset.stem} LPIPS variance: {round(statistics.variance(lpips_dataset), 3)}"
+        )
+        print(
+            f"{dataset.stem} LPIPS standard deviation: {round(statistics.stdev(lpips_dataset), 3)}"
+        )
         print(f"{dataset.stem} LPIPS min (best): {round(lpips_min_dataset, 3)}")
         print(f"{dataset.stem} LPIPS max (worst): {round(lpips_max_dataset, 3)}\n")
 
-    print("---COMPLETE RESULTS---")
+        if not args.no_display:
+            # LPIPS histogram
+            plt.hist(lpips_dataset, min(50, 2 * len(lpips_dataset)))
+            plt.title(f"{dataset.stem} LPIPS distance")
+            plt.xlabel("LPIPS")
+            plt.ylabel("Number of images")
+            plt.show()
+            plt.close()
 
-    print(f"PSNR average: {round(statistics.fmean(psnr_all), 3)}")
-    print(f"PSNR median: {round(statistics.median(psnr_all), 3)}")
-    print(f"PSNR max (best): {round(psnr_max_all, 3)}")
-    print(f"PSNR min (worst): {round(psnr_min_all, 3)}\n")
+    # print results
+    def print_results(scale_factor):
+        print(f"---{scale_factor}X UPSCALING RESULTS---")
 
-    print(f"LPIPS average: {round(statistics.fmean(lpips_all), 3)}")
-    print(f"LPIPS median: {round(statistics.median(lpips_all), 3)}")
-    print(f"LPIPS min (best): {round(lpips_min_all, 3)}")
-    print(f"LPIPS max (worst): {round(lpips_max_all, 3)}\n")
+        print(
+            f"PSNR average: {round(statistics.fmean(psnr_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"PSNR median: {round(statistics.median(psnr_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"PSNR variance: {round(statistics.variance(psnr_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"PSNR standard deviation: {round(statistics.stdev(psnr_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(f"PSNR max (best): {round(psnr_max[f'{scale_factor}x'], 3)}")
+        print(f"PSNR min (worst): {round(psnr_min[f'{scale_factor}x'], 3)}\n")
+
+        # PSNR histogram
+        plt.hist(
+            psnr_dict[f"{scale_factor}x"],
+            min(50, 2 * len(psnr_dict[f"{scale_factor}x"])),
+        )
+        plt.title(f"Overall PSNR ({scale_factor}x Upscaling)")
+        plt.xlabel("PSNR (dB)")
+        plt.ylabel("Number of images")
+        plt.show()
+        plt.close()
+
+        print(
+            f"LPIPS average: {round(statistics.fmean(lpips_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"LPIPS median: {round(statistics.median(lpips_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"LPIPS variance: {round(statistics.variance(lpips_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(
+            f"LPIPS standard deviation: {round(statistics.stdev(lpips_dict[f'{scale_factor}x']), 3)}"
+        )
+        print(f"LPIPS min (best): {round(lpips_min[f'{scale_factor}x'], 3)}")
+        print(f"LPIPS max (worst): {round(lpips_max[f'{scale_factor}x'], 3)}\n")
+
+        # LPIPS histogram
+        plt.hist(
+            lpips_dict[f"{scale_factor}x"],
+            min(50, 2 * len(lpips_dict[f"{scale_factor}x"])),
+        )
+        plt.title(f"Overall LPIPS distance ({scale_factor}x Upscaling)")
+        plt.xlabel("LPIPS")
+        plt.ylabel("Number of images")
+        plt.show()
+        plt.close()
+        print()
+
+    print_results(2)
+    print_results(3)
+    print_results(4)
 
 
 if __name__ == "__main__":

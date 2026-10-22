@@ -4,8 +4,6 @@ import lpips
 import numpy as np
 import torch
 
-rgb_to_grayscale_weights_torch = torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
-
 
 def evaluate_psnr(
     clean: np.ndarray, degraded: np.ndarray, max_pixel: float = 1
@@ -42,7 +40,7 @@ def evaluate_psnr_torch(
 
 
 def evaluate_lpips(
-    image0: torch.Tensor, image1: torch.Tensor, spatial: bool = False
+    image0: torch.Tensor, image1: torch.Tensor, loss_fn: lpips.LPIPS
 ) -> float:
     """
     Evaluates LPIPS between two images.
@@ -56,6 +54,5 @@ def evaluate_lpips(
     Returns:
         d (float): LPIPS distance between `image0` and `image1`.
     """
-    loss_fn = lpips.LPIPS(net="vgg", spatial=spatial)
     d = loss_fn.forward(image0, image1)
     return d
