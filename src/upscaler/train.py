@@ -1,7 +1,6 @@
 import os
 
 import lpips
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision.transforms.functional as F
@@ -182,6 +181,8 @@ def test_loop(
             psnr += psnr_single
 
             if display:
+                import matplotlib.pyplot as plt
+
                 print(f"IMAGE {i}")
                 print(f"LPIPS distance: {lpips_single:>4f}")
                 print(f"PSNR: {psnr_single:>2f}")
