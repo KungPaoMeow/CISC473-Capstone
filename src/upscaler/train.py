@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import lpips
@@ -43,8 +44,20 @@ class Div2kDataset(Dataset):
         self.patch_size = patch_size
         self.is_train = train
 
-        self.lr_filenames = np.array(sorted(os.listdir(lr_dir)))
-        self.hr_filenames = np.array(sorted(os.listdir(hr_dir)))
+        lr_by_id = {
+            os.path.splitext(filename)[0].split("x")[0]: filename
+            for filename in sorted(os.listdir(lr_dir))
+        }
+        self.hr_filenames = np.array(
+            [
+                filename
+                for filename in sorted(os.listdir(hr_dir))
+                if os.path.splitext(filename)[0] in lr_by_id
+            ]
+        )
+        self.lr_filenames = np.array(
+            [lr_by_id[os.path.splitext(filename)[0]] for filename in self.hr_filenames]
+        )
         if max_size is not None:
             self.lr_filenames = self.lr_filenames[:max_size]
             self.hr_filenames = self.hr_filenames[:max_size]
@@ -90,18 +103,21 @@ class Div2kDataset(Dataset):
         return lr_tensor, hr_tensor
 
 
-def get_train_and_test_datasets(patch_size, batch_size, scale_factor=2):
+def get_train_and_test_datasets(
+    patch_size, batch_size, scale_factor=2, num_validations=5
+):
     training_data = Div2kDataset(
         f"datasets/DIV2K_train_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_train_HR",
         patch_size,
         train=True,
+        max_size=400,
     )
     testing_data = Div2kDataset(
         f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_valid_HR",
         train=False,
-        max_size=5,
+        max_size=num_validations,
     )
 
     train_dataloader = DataLoader(
@@ -171,8 +187,8 @@ def test_loop(
 ):
     model.eval()
     num_batches = len(dataloader)
-    lpips_loss = 0
-    psnr = 0
+    lpips_scores = []
+    psnr_scores = []
 
     with torch.no_grad():
         for i, (X, y) in enumerate(dataloader):
@@ -189,22 +205,24 @@ def test_loop(
             y_gray = y[:, 0, :, :]
             psnr_single = evaluate_psnr_torch(pred_gray, y_gray)
 
-            lpips_loss += lpips_single
-            psnr += psnr_single
+            lpips_scores.append(lpips_single)
+            psnr_scores.append(psnr_single)
 
             if display:
                 import matplotlib.pyplot as plt
 
-                print(f"IMAGE {i}")
-                print(f"LPIPS distance: {lpips_single:>4f}")
-                print(f"PSNR: {psnr_single:>2f}")
+                print(
+                    f"IMAGE {i + 1}/{num_batches} | LPIPS: {lpips_single:.4f} "
+                    f"| PSNR: {psnr_single:.2f} dB"
+                )
                 plt.imshow(pred.permute(2, 3, 1, 0).cpu().numpy().squeeze())
                 plt.show()
-                print()
-    psnr /= num_batches
-    lpips_loss /= num_batches
-    print(f"average LPIPS distance: {lpips_loss:>4f}")
-    print(f"average PSNR: {psnr:>2f}")
+
+    print(f"Validation summary ({num_batches} images)")
+    print(
+        f"LPIPS: {np.mean(lpips_scores):.4f} +/- {np.std(lpips_scores):.4f}"
+    )
+    print(f"PSNR: {np.mean(psnr_scores):.2f} +/- {np.std(psnr_scores):.2f} dB")
 
 
 def save_model(model, file_path, file_name):
@@ -212,7 +230,26 @@ def save_model(model, file_path, file_name):
     torch.save(model.state_dict(), os.path.join(file_path, file_name))
 
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Train and validate the upscaler")
+    parser.add_argument(
+        "-s", "--skip", action="store_true", help="Skip displaying validation images"
+    )
+    parser.add_argument(
+        "-nv",
+        "--num-validations",
+        type=int,
+        default=5,
+        help="Number of validation images to evaluate (default: 5)",
+    )
+    args = parser.parse_args()
+    if args.num_validations < 1:
+        parser.error("--num-validations must be at least 1")
+    return args
+
+
 def __main__():
+    args = parse_arguments()
     scale_factor = 4
     learning_rate = 1e-3
     batch_size = 64
@@ -221,7 +258,10 @@ def __main__():
     patch_size = 32
 
     train_dataloader, test_dataloader = get_train_and_test_datasets(
-        patch_size=patch_size, batch_size=batch_size, scale_factor=scale_factor
+        patch_size=patch_size,
+        batch_size=batch_size,
+        scale_factor=scale_factor,
+        num_validations=args.num_validations,
     )
 
     if IS_DISTRIBUTED:
@@ -245,7 +285,7 @@ def __main__():
         train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, epoch=t)
         if t == epochs - 1:
             print("\nTESTING")
-            test_loop(test_dataloader, model, loss_fn_vgg)
+            test_loop(test_dataloader, model, loss_fn_vgg, display=not args.skip)
         print()
 
     if IS_MASTER:
