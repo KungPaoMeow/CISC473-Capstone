@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 
 import lpips
 import matplotlib.pyplot as plt
@@ -230,6 +231,16 @@ def save_model(model, file_path, file_name):
     torch.save(model.state_dict(), os.path.join(file_path, file_name))
 
 
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Train and validate the upscaler")
     parser.add_argument(
@@ -242,6 +253,9 @@ def parse_arguments():
         default=5,
         help="Number of validation images to evaluate (default: 5)",
     )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducible runs"
+    )
     args = parser.parse_args()
     if args.num_validations < 1:
         parser.error("--num-validations must be at least 1")
@@ -250,6 +264,7 @@ def parse_arguments():
 
 def __main__():
     args = parse_arguments()
+    set_random_seed(args.seed)
     scale_factor = 4
     learning_rate = 1e-3
     batch_size = 64
