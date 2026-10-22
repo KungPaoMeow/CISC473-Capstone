@@ -7,7 +7,7 @@ class UpscaleModel(nn.Module):
     FSRCNN that takes in all 3 channels with a pixel shuffle layer at the end to upscale.
     """
 
-    def __init__(self, num_channels=3, d=56, s=16, m=4, scale_factor=2):
+    def __init__(self, num_channels=3, d=100, s=40, m=4, scale_factor=2):
         super().__init__()
 
         # feature extraction

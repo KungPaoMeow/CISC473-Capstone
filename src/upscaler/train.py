@@ -183,8 +183,8 @@ def test_loop(
 
             if display:
                 print(f"IMAGE {i}")
-                print(f"LPIPS distance: {lpips_loss:>4f}")
-                print(f"PSNR: {psnr:>2f}")
+                print(f"LPIPS distance: {lpips_single:>4f}")
+                print(f"PSNR: {psnr_single:>2f}")
                 plt.imshow(pred.permute(2, 3, 1, 0).cpu().numpy().squeeze())
                 plt.show()
                 print()
@@ -200,12 +200,12 @@ def save_model(model, file_path, file_name):
 
 
 def __main__():
-    scale_factor = 2
+    scale_factor = 4
     learning_rate = 1e-3
     batch_size = 64
     epochs = 30
 
-    patch_size = 64
+    patch_size = 32
 
     train_dataloader, test_dataloader = get_train_and_test_datasets(
         patch_size=patch_size, batch_size=batch_size, scale_factor=scale_factor
