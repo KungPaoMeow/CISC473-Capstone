@@ -18,11 +18,16 @@ from .model import UpscaleModel
 IS_DISTRIBUTED = "LOCAL_RANK" in os.environ and torch.accelerator.is_available()
 
 if IS_DISTRIBUTED:
-    torch.distributed.init_process_group(backend="nccl")    # NVIDIA Collective Communications Library for GPU communication
     LOCAL_RANK = int(os.environ["LOCAL_RANK"])              # device ID of GPU executing this script
-    IS_MASTER = (LOCAL_RANK == 0)
-    device = f"{torch.accelerator.current_accelerator().type}:{LOCAL_RANK}"
-    torch.cuda.set_device(device)
+    RANK = int(os.environ["RANK"])
+    IS_MASTER = RANK == 0
+
+    torch.cuda.set_device(LOCAL_RANK)
+    device = torch.device(f"cuda:{LOCAL_RANK}")
+
+    torch.distributed.init_process_group(
+        backend="nccl",      # GPU communication backend, nccl not supported on Windows
+    )    
 else:
     IS_MASTER = True
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
@@ -97,7 +102,7 @@ class Div2kDataset(Dataset):
                 self.patch_size * scale,
             )
 
-        # transform to Pytorch Tensors
+        # transform to Pytorch Tensors in range [0, 1]
         lr_tensor = F.to_tensor(lr_image)
         hr_tensor = F.to_tensor(hr_image)
 
@@ -121,12 +126,20 @@ def get_train_and_test_datasets(
         max_size=num_validations,
     )
 
+    train_sampler = (
+        DistributedSampler(training_data, shuffle=True)
+        if IS_DISTRIBUTED
+        else None
+    )
+
     train_dataloader = DataLoader(
         dataset=training_data,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=4,
         pin_memory=True,
+        persistent_workers=True,
     )
     test_dataloader = DataLoader(
         dataset=testing_data,
@@ -169,13 +182,9 @@ def train_loop(
 
         if batch % 10 == 0:
             print(
-                f"pixel loss: {loss_pixel.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
-            )
-            print(
-                f"LPIPS distance: {loss_lpips.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
-            )
-            print(
-                f"loss: {loss_combined.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]"
+                f"pixel loss: {loss_pixel.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
+                f"LPIPS distance: {loss_lpips.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
+                f"loss: {loss_combined.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
             )
 
 
@@ -185,6 +194,7 @@ def test_loop(
     model: nn.Module,
     loss_fn_lpips: lpips.LPIPS,
     display: bool = False,
+    patch_size: int = 256,
 ):
     model.eval()
     num_batches = len(dataloader)
@@ -196,10 +206,20 @@ def test_loop(
             X = X.to(device)
             y = y.to(device)
 
-            pred = model(X)
+            pred = model(X)     # shape torch.Size([batch_size, channels, height, width])
+            _, _, height, width = pred.shape
 
-            # compute LPIPS loss
-            lpips_single = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean().item()
+            # compute LPIPS loss in batches
+            loss = patches = 0
+            for x_pixel in range(0, width, patch_size):
+                for y_pixel in range(0, height, patch_size):
+                    pred_patch = pred[:, :, y_pixel:y_pixel + patch_size, x_pixel:x_pixel + patch_size]
+                    target_patch = y[:, :, y_pixel:y_pixel + patch_size, x_pixel:x_pixel + patch_size]
+
+                    loss += loss_fn_lpips.forward(pred_patch * 2 - 1, target_patch * 2 - 1).mean().item()
+                    patches += 1
+
+            lpips_single = loss / patches
 
             # compute PSNR
             pred_gray = pred[:, 0, :, :]
@@ -268,7 +288,7 @@ def __main__():
     scale_factor = 4
     learning_rate = 1e-3
     batch_size = 64
-    epochs = 30
+    epochs = 5
 
     patch_size = 32
 
@@ -279,7 +299,7 @@ def __main__():
         num_validations=args.num_validations,
     )
 
-    if IS_DISTRIBUTED:
+    if IS_DISTRIBUTED and IS_MASTER:
         print("Using distributed multi-GPU environment")
     print(f"Using {device} device")
 
@@ -295,12 +315,14 @@ def __main__():
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     for t in range(epochs):
-        print(f"Epoch {t + 1}\n-------------------------------")
-        print("TRAINING")
+        if IS_MASTER:
+            print(f"Epoch {t + 1}\n-------------------------------")
+            print("TRAINING")
         train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, epoch=t)
         if t == epochs - 1:
-            print("\nTESTING")
-            test_loop(test_dataloader, model, loss_fn_vgg, display=not args.skip)
+            if IS_MASTER:
+                print("\nTESTING")
+                test_loop(test_dataloader, model, loss_fn_vgg, display=not args.skip)
         print()
 
     if IS_MASTER:
