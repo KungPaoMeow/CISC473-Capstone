@@ -223,3 +223,5 @@ __marimo__/
 inputs/
 datasets/
 models/
+gan/experiments/
+gan/tb_logger/
