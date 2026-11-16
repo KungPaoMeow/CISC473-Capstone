@@ -3,7 +3,6 @@ import os
 import random
 
 import lpips
-import matplotlib.pyplot as plt
 from PIL import Image
 import numpy as np
 import torch
@@ -13,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 from ..utils.metrics import evaluate_psnr_torch
-from .rrdbnet_arch import RRDBNet
+from .model import RRDBNet
 
 IS_DISTRIBUTED = "LOCAL_RANK" in os.environ and torch.accelerator.is_available()
 
@@ -30,7 +29,7 @@ if IS_DISTRIBUTED:
     )    
 else:
     IS_MASTER = True
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    device = torch.device("cuda:1") if torch.cuda.is_available() else "cpu"
 
 
 class Div2kDataset(Dataset):
@@ -110,16 +109,16 @@ class Div2kDataset(Dataset):
 
 
 def get_train_and_test_datasets(
-    patch_size, batch_size, scale_factor=2, num_validations=5
+    patch_size, batch_size, scale_factor=2, num_validations=100
 ):
     training_data = Div2kDataset(
         f"datasets/DIV2K_train_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_train_HR",
         patch_size,
         train=True,
-        max_size=400,
+        max_size=800,
     )
-    testing_data = Div2kDataset(
+    validation_data = Div2kDataset(
         f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
         "datasets/DIV2K_valid_HR",
         train=False,
@@ -128,6 +127,12 @@ def get_train_and_test_datasets(
 
     train_sampler = (
         DistributedSampler(training_data, shuffle=True)
+        if IS_DISTRIBUTED
+        else None
+    )
+
+    validation_sampler = (
+        DistributedSampler(validation_data, shuffle=False)
         if IS_DISTRIBUTED
         else None
     )
@@ -141,14 +146,15 @@ def get_train_and_test_datasets(
         pin_memory=True,
         persistent_workers=True,
     )
-    test_dataloader = DataLoader(
-        dataset=testing_data,
+    validation_dataloader = DataLoader(
+        dataset=validation_data,
         batch_size=1,
         shuffle=False,
+        sampler=validation_sampler,
         num_workers=2,
         pin_memory=True,
     )
-    return train_dataloader, test_dataloader
+    return train_dataloader, validation_dataloader
 
 
 # train loop
@@ -158,6 +164,7 @@ def train_loop(
     loss_fn_lpips: lpips.LPIPS,
     loss_fn_pixel,
     optimizer,
+    scheduler,
     epoch
 ):
     if isinstance(dataloader.sampler, DistributedSampler):
@@ -166,6 +173,12 @@ def train_loop(
     size = len(dataloader.dataset)
     batch_size = dataloader.batch_size
     model.train()
+
+    # Accumulate weighted loss totals
+    loss_l1_pixel_sum = torch.zeros((), device=device)
+    loss_lpips_sum = torch.zeros((), device=device)
+    num_samples = 0
+
     for batch, (X, y) in enumerate(dataloader):
         X = X.to(device)
         y = y.to(device)
@@ -174,21 +187,101 @@ def train_loop(
         loss_lpips = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean()
         loss_pixel = loss_fn_pixel(pred, y)
 
+        current_batch_size = X.size(0)
+        loss_l1_pixel_sum += loss_pixel.detach() * current_batch_size
+        loss_lpips_sum += loss_lpips.detach() * current_batch_size
+        num_samples += current_batch_size
+
         loss_combined = loss_lpips + loss_pixel
+
         # backpropagation
         loss_combined.backward()
         optimizer.step()
         optimizer.zero_grad()
+        scheduler.step()
 
-        if batch % 10 == 0:
+        if batch % 2 == 0:
             print(
+                f"{'rank ' + str(RANK) + '\n' if IS_DISTRIBUTED else ''}"
                 f"pixel loss: {loss_pixel.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
                 f"LPIPS distance: {loss_lpips.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
                 f"loss: {loss_combined.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
             )
 
+    # Combine totals from all GPUs
+    totals = torch.stack([
+        loss_l1_pixel_sum,
+        loss_lpips_sum,
+        torch.tensor(num_samples, device=device, dtype=torch.float32),
+    ])
+
+    if IS_DISTRIBUTED:
+        torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
+
+    return totals[0] / totals[2], totals[1] / totals[2]
+
 
 # test loop
+def validation_loop(
+    dataloader: DataLoader,
+    model: nn.Module,
+    loss_fn_lpips: lpips.LPIPS,
+    patch_size: int = 128,
+):
+    model.eval()
+    eval_model = model.module if IS_DISTRIBUTED else model
+    
+    lpips_scores = []
+    psnr_scores = []
+
+    with torch.no_grad():
+        for i, (X, y) in enumerate(dataloader):
+            X = X.to(device)
+            y = y.to(device)
+
+            pred = eval_model(X)     # shape torch.Size([batch_size, channels, height, width])
+            _, _, height, width = pred.shape
+
+            # compute LPIPS loss in batches
+            loss = patches = 0
+            for x_pixel in range(0, width, patch_size):
+                for y_pixel in range(0, height, patch_size):
+                    # Shift start coordinate back if the patch goes past the image border
+                    x_start = max(0, min(x_pixel, width - patch_size))
+                    y_start = max(0, min(y_pixel, height - patch_size))
+
+                    pred_patch = pred[:, :, y_start:y_start + patch_size, x_start:x_start + patch_size]
+                    target_patch = y[:, :, y_start:y_start + patch_size, x_start:x_start + patch_size]
+
+                    loss += loss_fn_lpips.forward(pred_patch * 2 - 1, target_patch * 2 - 1).mean().item()
+                    patches += 1
+
+            lpips_single = loss / patches
+
+            # compute PSNR
+            pred_gray = pred[:, 0, :, :]
+            y_gray = y[:, 0, :, :]
+            psnr_single = evaluate_psnr_torch(pred_gray, y_gray)
+
+            lpips_scores.append(lpips_single)
+            psnr_scores.append(psnr_single)
+
+    # Combine metrics across GPUs using a single tensor all_reduce
+    totals = torch.tensor(
+        [sum(psnr_scores), sum(lpips_scores), len(lpips_scores)],
+        device=device,
+        dtype=torch.float64,
+    )
+
+    if IS_DISTRIBUTED:
+        torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
+
+    mean_psnr = (totals[0] / totals[2]).item()
+    mean_lpips = (totals[1] / totals[2]).item()
+
+    return mean_psnr, mean_lpips
+
+
 def test_loop(
     dataloader: DataLoader,
     model: nn.Module,
@@ -240,9 +333,7 @@ def test_loop(
                 plt.show()
 
     print(f"Validation summary ({num_batches} images)")
-    print(
-        f"LPIPS: {np.mean(lpips_scores):.4f} +/- {np.std(lpips_scores):.4f}"
-    )
+    print(f"LPIPS: {np.mean(lpips_scores):.4f} +/- {np.std(lpips_scores):.4f}")
     print(f"PSNR: {np.mean(psnr_scores):.2f} +/- {np.std(psnr_scores):.2f} dB")
 
 
@@ -270,8 +361,8 @@ def parse_arguments():
         "-nv",
         "--num-validations",
         type=int,
-        default=5,
-        help="Number of validation images to evaluate (default: 5)",
+        default=100,
+        help="Number of validation images to evaluate (default: 100)",
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducible runs"
@@ -287,12 +378,12 @@ def __main__():
     set_random_seed(args.seed)
     scale_factor = 4
     learning_rate = 1e-3
-    batch_size = 64
-    epochs = 50
+    batch_size = 50
+    epochs = 100
 
     patch_size = 32
 
-    train_dataloader, test_dataloader = get_train_and_test_datasets(
+    train_dataloader, validation_dataloader = get_train_and_test_datasets(
         patch_size=patch_size,
         batch_size=batch_size,
         scale_factor=scale_factor,
@@ -303,27 +394,47 @@ def __main__():
         print("Using distributed multi-GPU environment")
     print(f"Using {device} device")
 
-    model = RRDBNet(3, 3, scale=scale_factor).to(device)
+    model = RRDBNet(3, 3, scale_factor=scale_factor).to(device)
     if IS_DISTRIBUTED:
         from torch.nn.parallel import DistributedDataParallel as DDP
         model = DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
 
-
-    loss_fn_vgg = lpips.LPIPS(net="vgg").to(device)
+    loss_fn_vgg = lpips.LPIPS(net="vgg").to(device).eval()
     loss_fn_pixel = nn.L1Loss().to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9, 0.99))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
+    train_l1_pixel_loss = []
+    train_lpips_loss = []
+    test_psnr_scores = []
+    test_lpips_scores = []
 
     for t in range(epochs):
         if IS_MASTER:
             print(f"Epoch {t + 1}\n-------------------------------")
             print("TRAINING")
-        train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, epoch=t)
-        if t == epochs - 1:
-            if IS_MASTER:
-                print("\nTESTING")
-                # test_loop(test_dataloader, model, loss_fn_vgg, display=not args.skip)
+        l1_loss, lpips_loss = train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, scheduler, epoch=t)
+        train_l1_pixel_loss.append(l1_loss.item())
+        train_lpips_loss.append(lpips_loss.item())
+
+        psnr_score, lpips_score = validation_loop(validation_dataloader, model, loss_fn_vgg)
+        test_psnr_scores.append(psnr_score)
+        test_lpips_scores.append(lpips_score)
         print()
+
+        if IS_MASTER and (t + 1) % 10 == 0:
+            checkpoint = {
+                "epoch": t,
+                "model": model.module.state_dict() if IS_DISTRIBUTED else model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "train_l1_pixel_loss": train_l1_pixel_loss,
+                "train_lpips_loss": train_lpips_loss,
+                "test_psnr_scores": test_psnr_scores,
+                "test_lpips_scores": test_lpips_scores,
+            }
+            torch.save(checkpoint, f"models/checkpoint_epoch_{t + 1}.pt")
 
     if IS_MASTER:
         model_to_save = model.module if IS_DISTRIBUTED else model   # DDP model weights in .module
@@ -334,7 +445,7 @@ def __main__():
             f"datasets/DIV2K_valid_LR_bicubic/X{scale_factor}",
             "datasets/DIV2K_valid_HR",
             train=False,
-            max_size=10,
+            max_size=5,
         )
         eval_dataloader = DataLoader(
             dataset=eval_data,
@@ -343,7 +454,36 @@ def __main__():
             num_workers=2,
             pin_memory=True,
         )
-        test_loop(eval_dataloader, model, loss_fn_vgg, display=True)
+        import matplotlib.pyplot as plt
+   
+        fig, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+        epoch_axis = range(1, epochs + 1)
+
+        # 1. Perceptual Loss (Train vs. Val on the same scale)
+        axes[0].plot(epoch_axis, train_lpips_loss, label='Train LPIPS', marker='o')
+        axes[0].plot(epoch_axis, test_lpips_scores, label='Val LPIPS', marker='s')
+        axes[0].set_ylabel('LPIPS (Lower is better)')
+        axes[0].set_title('Training & Validation Metrics Over Epochs')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # 2. Pixel Loss (Train L1 on its own scale)
+        axes[1].plot(epoch_axis, train_l1_pixel_loss, label='Train L1 Loss', color='tab:green', marker='^')
+        axes[1].set_ylabel('L1 Loss (Lower is better)')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        # 3. Image Quality Score (Val PSNR on its own scale)
+        axes[2].plot(epoch_axis, test_psnr_scores, label='Val PSNR', color='tab:purple', marker='d')
+        axes[2].set_ylabel('PSNR in dB (Higher is better)')
+        axes[2].set_xlabel('Epoch')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+        
+        test_loop(eval_dataloader, model, loss_fn_vgg, display=not args.skip)
 
     if IS_DISTRIBUTED:
         torch.distributed.destroy_process_group()
