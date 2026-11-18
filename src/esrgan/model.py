@@ -83,7 +83,7 @@ class RRDBNet(nn.Module):
         num_grow_ch (int): Channels for each growth. Default: 32.
     """
 
-    def __init__(self, num_in_ch, num_out_ch, scale_factor=4, num_feat=20, num_block=4, num_grow_ch=10):
+    def __init__(self, num_in_ch, num_out_ch, scale_factor=4, num_feat=24, num_block=4, num_grow_ch=10):
         super(RRDBNet, self).__init__()
         self.scale = scale_factor
         self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)   # [b x num_in_ch x h x w] -> [b x num_feat x h x w]

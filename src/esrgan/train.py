@@ -192,7 +192,7 @@ def train_loop(
         loss_lpips_sum += loss_lpips.detach() * current_batch_size
         num_samples += current_batch_size
 
-        loss_combined = loss_lpips + loss_pixel
+        loss_combined = loss_lpips + 3*loss_pixel
 
         # backpropagation
         loss_combined.backward()
@@ -379,7 +379,8 @@ def __main__():
     scale_factor = 4
     learning_rate = 1e-3
     batch_size = 50
-    epochs = 100
+    resume_epoch = 0
+    epochs = 200
 
     patch_size = 32
 
@@ -410,7 +411,33 @@ def __main__():
     test_psnr_scores = []
     test_lpips_scores = []
 
-    for t in range(epochs):
+    CHECKPOINT_REBOOT = True
+    if CHECKPOINT_REBOOT:
+        chkpt = torch.load("models/checkpoint_epoch_100-rrdb-100-4x-24feat-4block-10grow-2xpixel-1xlpips.pt", map_location=device)
+        if IS_DISTRIBUTED:
+            model.module.load_state_dict(chkpt["model"])
+        else:
+            model.load_state_dict(chkpt["model"])
+        resume_epoch = chkpt["epoch"] + 1
+        optimizer.load_state_dict(chkpt["optimizer"])
+        # scheduler.load_state_dict(chkpt["scheduler"])
+        train_l1_pixel_loss = chkpt["train_l1_pixel_loss"]
+        train_lpips_loss = chkpt["train_lpips_loss"]
+        test_psnr_scores = chkpt["test_psnr_scores"]
+        test_lpips_scores = chkpt["test_lpips_scores"]
+
+        # Override the learning rate inside the loaded optimizer
+        new_lr = learning_rate * 0.5
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = new_lr
+            param_group["initial_lr"] = new_lr  # Required by PyTorch schedulers
+
+        # Create a fresh scheduler for the next x epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs-resume_epoch, eta_min=1e-6
+        )
+
+    for t in range(resume_epoch, epochs):
         if IS_MASTER:
             print(f"Epoch {t + 1}\n-------------------------------")
             print("TRAINING")
