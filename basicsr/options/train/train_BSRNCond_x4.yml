@@ -16,7 +16,7 @@ datasets:
       io_backend:
         type: disk
       
-      gt_size: 256
+      gt_size: 1288
 
       blur_range: [0.2, 1.5]
       noise_range: [0, 10]
