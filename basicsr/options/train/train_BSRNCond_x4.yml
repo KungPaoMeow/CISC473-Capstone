@@ -11,7 +11,7 @@ datasets:
       name: SyntheticDiv2k
       type: SyntheticDegradationDataset
 
-      dataroot_gt: datasets/DIV2K_valid_HR
+      dataroot_gt: datasets/DIV2K_train_HR
 
       io_backend:
         type: disk
