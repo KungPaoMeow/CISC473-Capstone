@@ -11,7 +11,7 @@ import torchvision.transforms.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
-from ..utils.metrics import evaluate_psnr_torch
+from ..utils.metrics import evaluate_psnr_torch, loss_fn_fft
 from .model import RRDBNet
 
 IS_DISTRIBUTED = "LOCAL_RANK" in os.environ and torch.accelerator.is_available()
@@ -177,6 +177,7 @@ def train_loop(
     # Accumulate weighted loss totals
     loss_l1_pixel_sum = torch.zeros((), device=device)
     loss_lpips_sum = torch.zeros((), device=device)
+    loss_fft_sum = torch.zeros((), device=device)
     num_samples = 0
 
     for batch, (X, y) in enumerate(dataloader):
@@ -186,13 +187,15 @@ def train_loop(
 
         loss_lpips = loss_fn_lpips.forward(pred * 2 - 1, y * 2 - 1).mean()
         loss_pixel = loss_fn_pixel(pred, y)
+        loss_fft = loss_fn_fft(pred, y)
 
         current_batch_size = X.size(0)
         loss_l1_pixel_sum += loss_pixel.detach() * current_batch_size
         loss_lpips_sum += loss_lpips.detach() * current_batch_size
+        loss_fft_sum += loss_fft.detach() * current_batch_size
         num_samples += current_batch_size
 
-        loss_combined = loss_lpips + 3*loss_pixel
+        loss_combined = loss_lpips + 3*loss_pixel + 50*loss_fft
 
         # backpropagation
         loss_combined.backward()
@@ -205,6 +208,7 @@ def train_loop(
                 f"{'rank ' + str(RANK) + '\n' if IS_DISTRIBUTED else ''}"
                 f"pixel loss: {loss_pixel.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
                 f"LPIPS distance: {loss_lpips.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
+                f"FFT loss: {loss_fft.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
                 f"loss: {loss_combined.item():>7f}  [{batch * batch_size + len(X):>5d}/{size:>5d}]\n"
             )
 
@@ -212,13 +216,14 @@ def train_loop(
     totals = torch.stack([
         loss_l1_pixel_sum,
         loss_lpips_sum,
+        loss_fft_sum,
         torch.tensor(num_samples, device=device, dtype=torch.float32),
     ])
 
     if IS_DISTRIBUTED:
         torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
 
-    return totals[0] / totals[2], totals[1] / totals[2]
+    return totals[0]/totals[-1], totals[1]/totals[-1], totals[2]/totals[-1]
 
 
 # test loop
@@ -378,7 +383,7 @@ def __main__():
     set_random_seed(args.seed)
     scale_factor = 4
     learning_rate = 1e-3
-    batch_size = 50
+    batch_size = 40
     resume_epoch = 0
     epochs = 200
 
@@ -408,21 +413,23 @@ def __main__():
 
     train_l1_pixel_loss = []
     train_lpips_loss = []
+    train_fft_loss = []
     test_psnr_scores = []
     test_lpips_scores = []
 
-    CHECKPOINT_REBOOT = True
+    CHECKPOINT_REBOOT = False
     if CHECKPOINT_REBOOT:
-        chkpt = torch.load("models/checkpoint_epoch_100-rrdb-100-4x-24feat-4block-10grow-2xpixel-1xlpips.pt", map_location=device)
+        chkpt = torch.load("models/checkpoint_epoch_150.pt", map_location=device)
         if IS_DISTRIBUTED:
             model.module.load_state_dict(chkpt["model"])
         else:
             model.load_state_dict(chkpt["model"])
         resume_epoch = chkpt["epoch"] + 1
         optimizer.load_state_dict(chkpt["optimizer"])
-        # scheduler.load_state_dict(chkpt["scheduler"])
+        scheduler.load_state_dict(chkpt["scheduler"])
         train_l1_pixel_loss = chkpt["train_l1_pixel_loss"]
         train_lpips_loss = chkpt["train_lpips_loss"]
+        train_fft_loss = chkpt.get("train_fft_loss", None)
         test_psnr_scores = chkpt["test_psnr_scores"]
         test_lpips_scores = chkpt["test_lpips_scores"]
 
@@ -432,18 +439,19 @@ def __main__():
             param_group["lr"] = new_lr
             param_group["initial_lr"] = new_lr  # Required by PyTorch schedulers
 
-        # Create a fresh scheduler for the next x epochs
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs-resume_epoch, eta_min=1e-6
-        )
+        # # Create a fresh scheduler for the next x epochs
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer, T_max=epochs-resume_epoch, eta_min=1e-6
+        # )
 
     for t in range(resume_epoch, epochs):
         if IS_MASTER:
             print(f"Epoch {t + 1}\n-------------------------------")
             print("TRAINING")
-        l1_loss, lpips_loss = train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, scheduler, epoch=t)
+        l1_loss, lpips_loss, fft_loss = train_loop(train_dataloader, model, loss_fn_vgg, loss_fn_pixel, optimizer, scheduler, epoch=t)
         train_l1_pixel_loss.append(l1_loss.item())
         train_lpips_loss.append(lpips_loss.item())
+        train_fft_loss.append(fft_loss.item())
 
         psnr_score, lpips_score = validation_loop(validation_dataloader, model, loss_fn_vgg)
         test_psnr_scores.append(psnr_score)
@@ -458,6 +466,7 @@ def __main__():
                 "scheduler": scheduler.state_dict(),
                 "train_l1_pixel_loss": train_l1_pixel_loss,
                 "train_lpips_loss": train_lpips_loss,
+                "train_fft_loss": train_fft_loss,
                 "test_psnr_scores": test_psnr_scores,
                 "test_lpips_scores": test_lpips_scores,
             }
@@ -496,7 +505,8 @@ def __main__():
 
         # 2. Pixel Loss (Train L1 on its own scale)
         axes[1].plot(epoch_axis, train_l1_pixel_loss, label='Train L1 Loss', color='tab:green', marker='^')
-        axes[1].set_ylabel('L1 Loss (Lower is better)')
+        axes[1].plot(epoch_axis, train_fft_loss, label='Train FFT Loss', color='tab:red', marker='*')
+        axes[1].set_ylabel('L1 and FFT Loss (Lower is better)')
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
 

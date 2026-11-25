@@ -56,3 +56,27 @@ def evaluate_lpips(
     """
     d = loss_fn.forward(image0, image1)
     return d
+
+
+def loss_fn_fft(pred, target):
+    _, _, H, W = pred.shape    # pred and target: [B, C, H, W]
+
+    # ortho normalizes forward and inverse transforms by square root of number of transformed elements
+    # rfft shape is [B, C, N, M/2 + 1]
+    #   -> in Fourier, i (matrix col) < 0 is discarded since F(j,i) = conj(F(-j,-i)) if input all real
+    pred_fft = torch.fft.rfft2(pred, norm="ortho")
+    target_fft = torch.fft.rfft2(target, norm="ortho")
+
+    # Generate frequency coordinates
+    u = torch.fft.rfftfreq(W, device=pred.device)   # rfft since only positive values left
+    v = torch.fft.fftfreq(H, device=pred.device)    # fft for whole range
+
+    # 2D radial wavenumber
+    vv, uu = torch.meshgrid(v, u, indexing="ij")
+    wavenumber_squared = uu**2 + vv**2
+
+    # Complex coefficient difference
+    complex_diff = pred_fft - target_fft
+    error_mag = torch.abs(complex_diff)
+    
+    return (wavenumber_squared * error_mag).mean()
