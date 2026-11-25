@@ -89,7 +89,7 @@ class Div2kDataset(Dataset):
         lr_tensor = F.to_tensor(lr_image)
         hr_tensor = F.to_tensor(hr_image)
 
-        return lr_tensor, hr_tensor
+        return lr_tensor, hr_tensor, self.lr_dir, self.lr_filenames[idx]
 
 
 def test_loop(
@@ -105,7 +105,7 @@ def test_loop(
     psnr_scores = []
 
     with torch.no_grad():
-        for i, (X, y) in enumerate(dataloader):
+        for i, (X, y, dir, filename) in enumerate(dataloader):
             X = X.to(device)
             y = y.to(device)
 
@@ -141,8 +141,13 @@ def test_loop(
                     f"IMAGE {i + 1}/{num_batches} | LPIPS: {lpips_single:.4f} "
                     f"| PSNR: {psnr_single:.2f} dB"
                 )
-                plt.imshow(pred.permute(2, 3, 1, 0).cpu().numpy().squeeze())
-                plt.show()
+                # plt.imshow(pred.permute(2, 3, 1, 0).cpu().numpy().squeeze())
+                # plt.show()
+                img = pred.permute(2, 3, 1, 0).cpu().numpy().squeeze()
+                img = np.clip(img, 0, 1)  # Assuming values are normalized to [0, 1]
+                dir, filename = str(dir[0]), str(filename[0])
+                os.makedirs(f"outputs/{dir}_SR", exist_ok=True)
+                Image.fromarray((img * 255).astype(np.uint8)).save(f"outputs/{dir}_SR/{filename}")
 
     print(f"Validation summary ({num_batches} images)")
     print(f"LPIPS: {np.mean(lpips_scores):.4f} +/- {np.std(lpips_scores):.4f}")
@@ -155,8 +160,8 @@ def __main__():
     print(f"Using {device} device")
 
     model = RRDBNet(3, 3, scale_factor=scale_factor).to(device)
-    # model.load_state_dict(torch.load("models/rrdb-200-4x-24feat-4block-10grow.pth"))
-    model.load_state_dict(torch.load("models/rrdb-200-4x-24feat-4block-10grow-2xpixel-1xlpips.pth"))
+    model.load_state_dict(torch.load("models/model.pth"))
+    # model.load_state_dict(torch.load("models/rrdb-200-4x-24feat-4block-10grow-3xpixel-1xlpips-50xfft.pth"))
 
     loss_fn_vgg = lpips.LPIPS(net="vgg").to(device).eval()
 
