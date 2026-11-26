@@ -160,7 +160,8 @@ def __main__():
     print(f"Using {device} device")
 
     model = RRDBNet(3, 3, scale_factor=scale_factor).to(device)
-    model.load_state_dict(torch.load("models/model.pth"))
+    # model.load_state_dict(torch.load("experiments/RRDBCond_finetune_fullmodel/models/net_g_latest.pth")["params"])
+    model.load_state_dict(torch.load("models/rrdb-200-4x-18feat-3block-9grow-3xpixel-1xlpips-50xfft-freqDegradationHead.pth"))
     # model.load_state_dict(torch.load("models/rrdb-200-4x-24feat-4block-10grow-3xpixel-1xlpips-50xfft.pth"))
 
     loss_fn_vgg = lpips.LPIPS(net="vgg").to(device).eval()

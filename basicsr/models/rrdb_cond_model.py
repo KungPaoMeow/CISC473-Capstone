@@ -30,7 +30,7 @@ class RRDBCondModel(SRModel):
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
-        self.output = self.net_g(self.lq, self.degradation)
+        self.output = self.net_g(self.lq, current_iter)
 
         loss_combined = 0
         loss_dict = OrderedDict()
@@ -77,14 +77,20 @@ class RRDBCondModel(SRModel):
         # self.optimizer_g.step()
 
         if current_iter % 100 == 0:
-            for i, layer in enumerate(self.net_g.film):
-                print(
-                    f"Iteration {current_iter}, Block {i + 1}:",
-                    "weight =",
-                    layer.weight.abs().mean().item(),
-                    "bias =",
-                    layer.bias.abs().mean().item(),
-                )
+            for module_name in ("degradation_encoder", "frequency_head"):
+                module = getattr(self.net_g, module_name)
+
+                for name, layer in module.named_modules():
+                    if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                        grad = layer.weight.grad
+
+                        print(
+                            f"Iteration {current_iter}, "
+                            f"{module_name}.{name}: "
+                            f"weight={layer.weight.abs().mean().item():.6f}, "
+                            f"grad={grad.abs().mean().item() if grad is not None else 0:.8f}"
+                        )
+
 
         self.log_dict = self.reduce_loss_dict(loss_dict)
 
@@ -114,9 +120,9 @@ class RRDBCondModel(SRModel):
         #         param.requires_grad_(True)
 
         super().init_training_settings()
-        self.loss_fn_vgg = lpips.LPIPS(net="vgg").to(self.device).eval()
+        self.loss_fn_lpips = lpips.LPIPS(net="vgg").to(self.device).eval()
         self.loss_fn_pixel = nn.L1Loss().to(self.device)
-        self.loss_fn_fft = loss_fn_fft.to(self.device)
+        self.loss_fn_fft = loss_fn_fft
 
     def setup_optimizers(self):
         train_opt = self.opt["train"]
@@ -129,18 +135,15 @@ class RRDBCondModel(SRModel):
             if not param.requires_grad:
                 continue
 
-            if name.startswith(("degradation_encoder.", "film.")):
+            if name.startswith(("degradation_encoder.", "frequency_head.")):
                 conditioning_params.append(param)
-
-            elif name.startswith(("c1.", "c2.", "upsampler.")):
-                reconstruction_params.append(param)
 
             else:
                 backbone_params.append(param)
 
         optim_params = [
-            {"params": conditioning_params, "lr": 1e-4},
-            {"params": reconstruction_params, "lr": 1e-5},
+            {"params": conditioning_params, "lr": 1e-5},
+            # {"params": reconstruction_params, "lr": 1e-5},
             {"params": backbone_params, "lr": 1e-6},
         ]
 
