@@ -1,4 +1,4 @@
-name: test_RRDBCond_x4_18feat-3block-9grow_200iter
+name: test_RRDBCond_x4_18feat-3block-9grow_20000iter
 suffix: ~  # add suffix to saved images
 model_type: RRDBCondModel
 scale: 4
@@ -92,9 +92,9 @@ network_g:
 
 # path
 path:
-  pretrain_network_g: models/rrdb-200-4x-18feat-3block-9grow-3xpixel-1xlpips-50xfft-freqDegradationHead.pth
+  pretrain_network_g: experiments/RRDBCond_finetune_fullmodel_20000_iters/models/net_g_latest.pth
   strict_load_g: false
-  param_key_g: ~
+  param_key_g: params
 
 # validation settings
 val:

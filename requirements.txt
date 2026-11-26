@@ -46,3 +46,5 @@ tqdm==4.70.1
 typing_extensions==4.16.0
 lpips
 matplotlib
+pyyaml
+tensorboard
