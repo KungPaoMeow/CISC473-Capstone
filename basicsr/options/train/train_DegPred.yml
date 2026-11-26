@@ -1,0 +1,90 @@
+name: train_degradation_predictor
+model_type: DegradationPredictorModel
+scale: 4
+num_gpu: 1
+manual_seed: 0
+
+datasets:
+  train:
+    name: SyntheticDiv2k
+    type: SyntheticDegradationDataset
+
+    dataroot_gt: datasets/DIV2K_train_HR
+
+    io_backend:
+      type: disk
+    
+    gt_size: 288
+
+    blur_range: [0.2, 1.5]
+    noise_range: [0, 10]
+    jpeg_range: [60, 100]
+    skip: 0.1
+
+    use_hflip: true
+    use_rot: true
+
+    use_shuffle: true
+    num_worker_per_gpu: 4
+    batch_size_per_gpu: 32
+    dataset_enlarge_ratio: 100
+    prefetch_mode: ~
+    
+
+  val_1: # the 1st test dataset
+    name: Set5Random
+    type: SyntheticDegradationDataset
+    dataroot_gt: ./datasets/Set5/GTmod4
+    # dataroot_lq: ./datasets/Set5/LRbicx4
+    io_backend:
+      type: disk
+    blur_range: [0.2, 1.5]
+    noise_range: [0, 10]
+    jpeg_range: [60, 95]
+    gt_size: 228
+    skip: 0.1
+    fix_seed: true
+  val_2: # the 2st test dataset
+    name: Set14Random
+    type: SyntheticDegradationDataset
+    dataroot_gt: ./datasets/Set14/GTmod4
+    # dataroot_lq: ./datasets/Set14/LRbicx4
+    io_backend:
+      type: disk
+    blur_range: [0.2, 1.5]
+    noise_range: [0, 10]
+    jpeg_range: [60, 95]
+    gt_size: 228
+    skip: 0.1
+    fix_seed: true
+
+network_d:
+  type: DegradationPredictor
+  degradation_dim: 3
+
+path:
+  pretrain_network_d: ~
+  strict_load_d: true
+  resume_state: ~
+
+train:
+  optim_d:
+    type: Adam
+    lr: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 40000]
+    gamma: 0.5
+
+  total_iter: 50000
+  warmup_iter: -1
+
+val:
+  val_freq: 2000
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 2000
+  use_tb_logger: true

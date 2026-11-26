@@ -4,10 +4,11 @@ import random
 import cv2
 import numpy as np
 import torch
+from torch.utils import data
+
 from basicsr.utils import FileClient, imfrombytes, img2tensor, scandir
 from basicsr.utils.matlab_functions import rgb2ycbcr
 from basicsr.utils.registry import DATASET_REGISTRY
-from torch.utils import data
 
 
 @DATASET_REGISTRY.register()
@@ -50,7 +51,9 @@ class SyntheticDegradationDataset(data.Dataset):
         self.file_client = None
 
         self.gt_size = opt.get("gt_size", 256)
-        self.skip = opt.get("skip", 0.10)
+        self.skip = opt.get("skip", 0.30)
+
+        self.fix_seed = opt.get("fix_seed", False)
 
         self.paths = [
             os.path.join(self.gt_folder, v)
@@ -81,6 +84,9 @@ class SyntheticDegradationDataset(data.Dataset):
         if h < self.gt_size or w < self.gt_size:
             raise ValueError(f"image {gt_path} is smaller than gt_size {self.gt_size}")
 
+        if self.fix_seed:
+            random.seed(0)
+
         # crop the image randomly
         top = random.randint(0, h - self.gt_size)
         left = random.randint(0, w - self.gt_size)
@@ -92,7 +98,7 @@ class SyntheticDegradationDataset(data.Dataset):
         # 3. noise injection
         # 4. JPEG compression
 
-        # skip everything except downsampling 5% of the time so some data is very simple
+        # skip everything except downsampling some % of the time so some data is very simple
         skip = random.random() < self.skip
 
         # blur
@@ -155,7 +161,6 @@ class SyntheticDegradationDataset(data.Dataset):
                 blur_factor,
                 noise_factor,
                 jpeg_quality,
-                self.scale,
             ],
             dtype=torch.float32,
         )

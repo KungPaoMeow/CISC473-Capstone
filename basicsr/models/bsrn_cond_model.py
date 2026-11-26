@@ -1,8 +1,16 @@
 from collections import OrderedDict
 
 import torch
+
 from basicsr.models.sr_model import SRModel
 from basicsr.utils.registry import MODEL_REGISTRY
+
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():  # For Apple Silicon (M1/M2/M3+)
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
 
 @MODEL_REGISTRY.register()
@@ -24,6 +32,7 @@ class BSRNCondModel(SRModel):
             ],
             1,
         )
+        # self.degradation = torch.zeros(self.degradation.shape).to(device)
 
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
@@ -85,6 +94,13 @@ class BSRNCondModel(SRModel):
         #         ("degradation_encoder.", "film.", "c1.", "c2.", "upsampler.")
         #     ):
         #         param.requires_grad_(True)
+        self.net_d = DegradationPredictor(
+            degradation_dim=3
+        ).to(self.device)
+
+        self.net_d = self.model_to_device(self.net_d)
+
+        self.net_g = self.model_to_device(self.net_g)
 
         super().init_training_settings()
 

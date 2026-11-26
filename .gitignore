@@ -225,3 +225,4 @@ datasets/
 /models/
 experiments/
 tb_logger/
+/results/
