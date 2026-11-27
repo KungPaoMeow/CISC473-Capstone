@@ -1,9 +1,10 @@
 # general settings
-name: BSRNCond_finetune_fullmodel
+name: BSRNCond_finetune_fullmodel_QUICK_TEST
 model_type: BSRNCondModel
 scale: 4
 num_gpu: 1  # set num_gpu: 0 for cpu mode
 manual_seed: 0
+use_degradation_model: true
 
 # dataset and data loader settings
 datasets:
@@ -16,12 +17,13 @@ datasets:
       io_backend:
         type: disk
       
-      gt_size: 1288
+      gt_size: 256
 
       blur_range: [0.2, 1.5]
       noise_range: [0, 10]
       jpeg_range: [60, 100]
       skip: 0.1
+
 
       use_hflip: true
       use_rot: true
@@ -72,14 +74,19 @@ network_g:
   num_block: 8
   num_out_ch: 3
   upscale: 4
-  degradation_dim: 4
+  degradation_dim: 3
   embed_dim: 32
+
+network_d:
+  type: DegradationPredictor
+  degradation_dim: 3
 
 # path
 path:
   pretrain_network_g: basicsr/net_g_BSRN_x4.pth
   param_key_g: params
   strict_load_g: false
+  pretrain_network_d: models/degradation_predictor_latest.pth
 
 # training settings
 train:
@@ -87,6 +94,11 @@ train:
     type: Adam
     lr: !!float 1e-5
     weight_decay: 0
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: Adam
+    lr: !!float 1e-5
     betas: [0.9, 0.99]
 
   scheduler:

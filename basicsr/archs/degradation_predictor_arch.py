@@ -12,7 +12,7 @@ class DegradationPredictor(nn.Module):
 
     """
 
-    def __init__(self, degradation_dim=4):
+    def __init__(self, degradation_dim=3):
         super().__init__()
 
         self.features = nn.Sequential(

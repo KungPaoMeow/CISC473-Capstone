@@ -51,6 +51,20 @@ datasets:
     gt_size: 228
     skip: 0
     fix_seed: true
+  
+  test_3: # the 2st test dataset
+    name: Urban100Random
+    type: SyntheticDegradationDataset
+    dataroot_gt: ./datasets/Urban100/GTmod4
+    # dataroot_lq: ./datasets/Set14/LRbicx4
+    io_backend:
+      type: disk
+    blur_range: [0.2, 1.5]
+    noise_range: [0, 10]
+    jpeg_range: [60, 95]
+    gt_size: 512
+    skip: 0
+    fix_seed: true
 
   test_3:
     name: Set5

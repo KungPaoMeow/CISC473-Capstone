@@ -46,7 +46,7 @@ class BSRNCond(BSRN):
         conv="BSConvU",
         upsampler="pixelshuffledirect",
         p=0.25,
-        degradation_dim=4,
+        degradation_dim=3,
         embed_dim=32,
     ):
 
